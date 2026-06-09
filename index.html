@@ -951,7 +951,7 @@ ${venue.eventConcept}
 
                     <div className="flex items-center justify-between p-2.5 bg-white rounded-lg border border-slate-200">
                       <span className="text-xs font-bold text-slate-600">주류 혜택 (콜키지 서비스)</span>
-                      <label className="relative inline-flex items-center cursor-pointer">
+                      <label className="relative inline-flex inline-flex items-center cursor-pointer">
                         <input 
                           type="checkbox" 
                           checked={corkageFilter} 
@@ -979,15 +979,15 @@ ${venue.eventConcept}
                           { key: "파티션 구획", label: "파티션 구획 (가벼운 칸막이)" }
                         ].map((item) => (
                           <button
-                            key={item}
-                            onClick={() => setSoundproofFilter(item)}
+                            key={item.key}
+                            onClick={() => setSoundproofFilter(item.key)}
                             className={`text-xs px-2.5 py-1.5 rounded-lg border flex-1 transition-all ${
-                              soundproofFilter === item 
+                              soundproofFilter === item.key 
                                 ? 'bg-teal-700 border-teal-700 text-white font-semibold' 
                                 : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-100'
                             }`}
                           >
-                            {item}
+                            {item.label}
                           </button>
                         ))}
                       </div>

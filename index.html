@@ -369,8 +369,8 @@
         setAiSearchResults([]);
         setSearchError(""); 
 
-        // gemini-3.1-flash-lite 이전의 검증된 표준 고성능 모델인 gemini-2.5-flash-preview-09-2025를 엔진으로 지목합니다.
-        const modelName = "gemini-2.5-flash-preview-09-2025";
+        // 2026년 6월 기준 안정화된 최신 Gemini 모델 (AQ 키 완전 지원)
+        const modelName = "gemini-2.5-flash";
         setSearchStep(`[구글 실시간 수집] ${modelName} 및 AQ 자격증명 라우터 결합 연동 중... 🔍`);
 
         const userPrompt = `
@@ -410,22 +410,25 @@
         let authStrategySuccess = false;
 
         // === 3-Way Adaptive Auth Router 가동 ===
-        // Strategy 1: x-goog-api-key 헤더 방식 (신규 AQ 계열 Key 최적화 규격)
+        // google_search tool과 JSON 응답을 동시에 요청하면 충돌 → 검색 결과를 먼저 받고 파싱
+        // AQ 키는 x-goog-api-key 헤더로 인증하는 것이 공식 지원 방식
+        const buildPayload = () => ({
+          contents: [{ parts: [{ text: userPrompt }] }],
+          tools: [{ "google_search": {} }],
+          generationConfig: { temperature: 0.1 }
+        });
+
+        // Strategy 1: x-goog-api-key 헤더 방식 (AQ 계열 Key 공식 인증 규격)
         if (!authStrategySuccess) {
           try {
             const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`;
-            const payload = {
-              contents: [{ parts: [{ text: userPrompt }] }],
-              tools: [{ "google_search": {} }],
-              generationConfig: { responseMimeType: "application/json" }
-            };
             const result = await fetchWithRetry(url, {
               method: 'POST',
               headers: { 
                 'Content-Type': 'application/json',
                 'x-goog-api-key': cleanKey 
               },
-              body: JSON.stringify(payload)
+              body: JSON.stringify(buildPayload())
             });
             finalResponse = result;
             authStrategySuccess = true;
@@ -434,48 +437,38 @@
           }
         }
 
-        // Strategy 2: Authorization: Bearer 헤더 방식 (GCP OAuth2 / 서비스 인증 토큰 규격 호환)
+        // Strategy 2: ?key= 쿼리 파라미터 방식 (전통적 예비 수단)
+        if (!authStrategySuccess) {
+          try {
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${cleanKey}`;
+            const result = await fetchWithRetry(url, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(buildPayload())
+            });
+            finalResponse = result;
+            authStrategySuccess = true;
+          } catch (err) {
+            console.warn("전략 2 (쿼리 파라미터) 통과 거부. 전략 3으로 전환합니다.", err);
+          }
+        }
+
+        // Strategy 3: Authorization: Bearer 헤더 방식 (GCP OAuth2 / 서비스 인증 토큰 규격 호환)
         if (!authStrategySuccess) {
           try {
             const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`;
-            const payload = {
-              contents: [{ parts: [{ text: userPrompt }] }],
-              tools: [{ "google_search": {} }],
-              generationConfig: { responseMimeType: "application/json" }
-            };
             const result = await fetchWithRetry(url, {
               method: 'POST',
               headers: { 
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${cleanKey}`
               },
-              body: JSON.stringify(payload)
+              body: JSON.stringify(buildPayload())
             });
             finalResponse = result;
             authStrategySuccess = true;
           } catch (err) {
-            console.warn("전략 2 (Authorization Bearer 헤더) 통과 거부. 전략 3으로 전환합니다.", err);
-          }
-        }
-
-        // Strategy 3: Standard ?key= 쿼리 파라미터 방식 (전통적 예비 수단)
-        if (!authStrategySuccess) {
-          try {
-            const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${cleanKey}`;
-            const payload = {
-              contents: [{ parts: [{ text: userPrompt }] }],
-              tools: [{ "google_search": {} }],
-              generationConfig: { responseMimeType: "application/json" }
-            };
-            const result = await fetchWithRetry(url, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(payload)
-            });
-            finalResponse = result;
-            authStrategySuccess = true;
-          } catch (err) {
-            console.error("전략 3 (쿼리 매핑) 최종 전송 오류.", err);
+            console.error("전략 3 (Authorization Bearer) 최종 전송 오류.", err);
             setSearchError(err.message || "모든 API 인증 기법이 구글 서버로부터 반려되었습니다.");
           }
         }
@@ -483,11 +476,21 @@
         // 결과 가공 및 디스플레이 파트
         try {
           if (authStrategySuccess && finalResponse) {
-            const rawText = finalResponse?.candidates?.[0]?.content?.parts?.[0]?.text;
-            const attributions = finalResponse?.candidates?.[0]?.groundingMetadata?.groundingAttributions;
+            // google_search 사용 시 parts가 여러 개 생성됨 → JSON이 담긴 마지막 text part를 추출
+            const allParts = finalResponse?.candidates?.[0]?.content?.parts || [];
+            const rawText = allParts.filter(p => p.text).map(p => p.text).join("");
+            const attributions = finalResponse?.candidates?.[0]?.groundingMetadata?.groundingAttributions
+              || finalResponse?.candidates?.[0]?.groundingMetadata?.groundingChunks?.map(c => ({ web: c.web }));
 
             if (rawText) {
-              const cleanJsonText = rawText.replace(/^```json\s*/i, '').replace(/```\s*$/, '').trim();
+              // ```json ... ``` 펜스 제거, JSON 배열 부분만 추출
+              let cleanJsonText = rawText.replace(/^```json\s*/i, '').replace(/```\s*$/, '').trim();
+              // 배열 시작 '[' 앞의 불필요한 텍스트 제거
+              const arrayStart = cleanJsonText.indexOf('[');
+              const arrayEnd = cleanJsonText.lastIndexOf(']');
+              if (arrayStart !== -1 && arrayEnd !== -1) {
+                cleanJsonText = cleanJsonText.slice(arrayStart, arrayEnd + 1);
+              }
               const parsedResults = JSON.parse(cleanJsonText);
 
               if (Array.isArray(parsedResults) && parsedResults.length > 0) {
@@ -501,7 +504,13 @@
                   })).filter(s => s.uri);
                   setGroundingSources(sources);
                 } else {
-                  setGroundingSources([]);
+                  // groundingChunks 형식 처리 (신규 API 응답 포맷)
+                  const chunks = finalResponse?.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
+                  const sources = chunks.map(c => ({
+                    uri: c.web?.uri,
+                    title: c.web?.title || "구글 실시간 검색 출처"
+                  })).filter(s => s.uri);
+                  setGroundingSources(sources);
                 }
 
                 showToast(`✨ 실시간 구글 크롤링 검색 성공! 실제 장소와 출처를 확보했습니다.`);
